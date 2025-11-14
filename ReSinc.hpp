@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <stdexcept>
 #include <vector>
 
 #define _USE_MATH_DEFINES
@@ -17,8 +18,8 @@
  * Behaviour:
  * - Construct with an initial value used to initialize stored elements.
  * - push(element) inserts a new element and overwrites the oldest when full.
- * - operator[](index) accesses elements relative to the newest element:
- *   index 0 == most recently pushed element, index increases towards older
+ * - operator[](index) accesses elements relative to the oldest element:
+ *   index 0 == oldest element, index increases towards more recently pushed
  *   elements.
  * - clear() zeroes the storage and resets the internal index.
  *
@@ -33,311 +34,405 @@ private:
 
 public:
     CircularBuffer(T initValue);
+    CircularBuffer(const CircularBuffer&) = default;
+    CircularBuffer(CircularBuffer&&) noexcept = default;
+    CircularBuffer& operator=(const CircularBuffer&) = default;
+    CircularBuffer& operator=(CircularBuffer&&) noexcept = default;
     void push(T element);
     T& operator[](size_t index);
     void clear();
 };
 
 namespace Window {
-    template<size_t N>
+    template<typename T, size_t N>
+    /**
+     * @brief Generic window function container.
+     *
+     * Window holds a precomputed window of length N and provides accessors
+     * and an applyOn() helper to multiply an array by the window.
+     *
+     * @tparam N Length of the window (compile-time constant).
+     *
+     * Methods:
+     * - operator[](i) / operator[](i) const : access window sample i.
+     * - applyOn(data) : multiplies the provided data array in-place by the
+     *   window values.
+     * - size() : returns N.
+     *
+     * Complexity: operator[] and size() are O(1); applyOn() is O(N).
+     */
     class Window {
     public:
         virtual ~Window() = default;
-        virtual float& operator[](size_t i);
-        virtual const float& operator[](size_t i) const;
-        void applyOn(std::array<float, N>& data) const;
+        Window(const Window&) = delete;
+        Window(Window&&) = delete;
+        Window& operator=(const Window&) = delete;
+        Window& operator=(Window&&) = delete;
+
+        virtual T& operator[](size_t i);
+        virtual const T& operator[](size_t i) const;
+        void applyOn(std::array<T, N>& data) const;
         size_t size() const;
 
     protected:
         Window() = default;
 
     private:
-        std::array<float, N> window;
+        std::array<T, N> window;
     };
 
-    template<size_t N>
-    class Kaiser : public Window<N> {
+    /**
+     * @brief Kaiser window implementation.
+     *
+     * Uses the Kaiser window parameterised by beta. Provides a private
+     * helper besselI0() for the window calculation.
+     *
+     * @tparam N Length of the window.
+     * @param beta Shape parameter for the Kaiser window.
+     */
+    template<typename T, size_t N>
+    class Kaiser : public Window<T, N> {
     public:
-        Kaiser(float beta);
+        Kaiser(T beta);
         ~Kaiser() = default;
+        Kaiser(const Kaiser&) = delete;
+        Kaiser(Kaiser&&) = delete;
+        Kaiser& operator=(const Kaiser&) = delete;
+        Kaiser& operator=(Kaiser&&) = delete;
 
     private:
-        const float beta;
-        float besselI0(float x);
+        const T beta;
+        T besselI0(T x);
     };
 }    // namespace Window
 
-// TODO: all resample functions
-template<int iSize, int N>
+/**
+ * @brief Multi-channel resampler.
+ *
+ * Resample converts between sample rates by interpolating and decimating
+ * buffers using a precomputed Sinc table. The class manages per-channel
+ * circular history buffers for block-based processing.
+ *
+ * Template parameters:
+ * @tparam T     Sample type (defaults to float).
+ * @tparam iSize Interpolation factor (number of sub-samples per input
+ *               sample).
+ * @tparam N     Sinc kernel radius (number of taps on each side).
+ *
+ * Main methods:
+ * - configure(sampleRate): prepares internal tables for the given rate.
+ * - interpolate(ptrToBuffers, numChannels, numSamples): performs upsampling.
+ * - decimate(ptrToBuffers): performs downsampling.
+ * - process(processBlock): calls the provided function with the
+ *   interpolated buffer.
+ *
+ * Complexity: per-sample cost depends on N and iSize (O(N*iSize) per
+ * output sample in the naive implementation).
+ */
+template<int iSize, int N, typename T = float>
 class ReSample {
 public:
-    void configure(double sampleRate);
-    void interpolate(juce::AudioBuffer<float>& buffer);
-    void decimate(juce::AudioBuffer<float>& buffer);
+    ReSample();
+    ~ReSample() = default;
+    ReSample(const ReSample&) = delete;
+    ReSample& operator=(const ReSample&) = delete;
+    ReSample(ReSample&&) noexcept = default;
+    ReSample& operator=(ReSample&&) noexcept = default;
 
-    void process(std::function<void(juce::AudioBuffer<float>&)> processBlock);
+    void configure(T sampleRate);
+    void interpolate(const T* const* ptrToBuffers,
+                     int numChannels,
+                     int numSamples);
+    void decimate(T* const* ptrToBuffers);
+
+    void process(std::function<void(std::vector<std::vector<T>>)> processBlock);
 
 private:
     Sinc<iSize, N> sinc;
-    juce::AudioBuffer<float> interpolatedBuf;
-    std::vector<CircularBuffer<float, N>> beginBuf, endBuf;
-    std::vector<CircularBuffer<float, N * iSize>> decBeginBuf, decEndBuf;
-
+    std::vector<std::vector<T>> interpolatedBuf;
+    std::vector<CircularBuffer<T, N>> beginBuf, endBuf;
+    std::vector<CircularBuffer<T, N * iSize>> decBeginBuf, decEndBuf;
+    size_t numChannels;
+    size_t numSamples;
+    /**
+     * @brief Precomputed Sinc lookup table used for interpolation/decimation.
+     *
+     * The Sinc class stores a symmetric table of sinc samples and provides
+     * fast indexed access for building interpolated samples. It supports
+     * accessing by integer sample index or by (index, delta) for sub-sample
+     * fractional positions.
+     *
+     * Methods:
+     * - operator[](i) : returns sinc at integer index (symmetric access).
+     * - operator()(i, delta) : returns sinc value for sample index i and
+     *   fractional offset delta (0..iSize-1).
+     * - configure(sampleRate) : fills the table for the provided sample rate.
+     * - applyWindow(window) : multiplies the sinc table by a window function
+     *   (e.g. Kaiser) to reduce ringing.
+     */
     class Sinc {
     private:
-        std::array<float, (N + 1) * iSize> sinc;
+        std::array<T, (N + 1) * iSize> sinc;
 
     public:
         Sinc();
+        ~Sinc() = default;
+        Sinc(const Sinc&) = default;
+        Sinc(Sinc&&) noexcept = default;
+        Sinc& operator=(const Sinc&) = default;
+        Sinc& operator=(Sinc&&) noexcept = default;
 
-        float& operator[](int i);
-
-        float& operator()(int i, int delta);
-
-        void configure(float sampleRate);
-
+        T& operator[](int i);
+        T& operator()(int i, int delta);
+        void configure(T sampleRate);
         size_t size() const;
-
-        void applyKaiser(float beta);
+        void applyWindow(Window::Window<T, (N + 1) * iSize * 2>& window);
     };
 };
 
+// CircularBuffer definitions
+template<class T, size_t size>
+inline CircularBuffer<T, size>::CircularBuffer(T initValue) : oldestIndex {0} {
+    buf.fill(initValue);
+}
+
+template<class T, size_t size>
+inline void CircularBuffer<T, size>::push(T element) {
+    this->buf[this->oldestIndex] = std::move(element);
+    this->oldestIndex = this->oldestIndex == size - 1 ? 0 : oldestIndex + 1;
+}
+
+template<class T, size_t size>
+inline T& CircularBuffer<T, size>::operator[](size_t index) {
+    return this->buf[(this->oldestIndex + index) % size];
+}
+
+template<class T, size_t size>
+inline void CircularBuffer<T, size>::clear() {
+    buf.fill(T {0});
+    this->oldestIndex = 0;
+}
+
 // Definitions for Window
-template<size_t N>
-inline size_t Window::Window<N>::size() const {
+template<typename T, size_t N>
+inline size_t Window::Window<T, N>::size() const {
     return N;
 }
 
-template<size_t N>
-inline float& Window::Window<N>::operator[](size_t i) {
+template<typename T, size_t N>
+inline T& Window::Window<T, N>::operator[](size_t i) {
     return window[i];
 }
 
-template<size_t N>
-inline const float& Window::Window<N>::operator[](size_t i) const {
+template<typename T, size_t N>
+inline const T& Window::Window<T, N>::operator[](size_t i) const {
     return window[i];
 }
 
-template<size_t N>
-inline void Window::Window<N>::applyOn(std::array<float, N>& data) const {
+template<typename T, size_t N>
+inline void Window::Window<T, N>::applyOn(std::array<T, N>& data) const {
     for(size_t i = 0; i < N; i++) {
         data[i] *= window[i];
     }
 }
 
 // Definitions for Kaiser
-template<size_t N>
-inline Window::Kaiser<N>::Kaiser(float beta) : Window {}, beta {beta} {
-    for(int n = 0; n < (N + 1) / 2; n++) {
-        float arg = beta * std::sqrt(1 - (2.0f * n / N) * (2.0f * n / N));
-        float num = besselI0(arg);
-        float den = besselI0(beta);
-        this[n] = num / den;
+template<typename T, size_t N>
+inline Window::Kaiser<T, N>::Kaiser(T beta) : Window<T, N> {}, beta {beta} {
+    if(beta < T(0.0)) {
+        throw std::invalid_argument("Kaiser beta value must be non-negative.");
+    }
+    const T M = static_cast<T>(N * 2);
+    const T den = besselI0(beta);
+    for(int n = 0; n < N; n++) {
+        T arg = beta * std::sqrt(1.0 - std::pow(2.0 * n / M, 2.0));
+        T num = besselI0(arg);
+        (*this)[n] = num / den;
     }
 }
 
-template<size_t N>
-inline float Window::Kaiser<N>::besselI0(float x) {
-    const float epsilon = 1e-6f;
-    float sum = 1.0f;
-    float term = 1.0f;
-    float k = 1.0f;
-    float factorial = 1.0f;
-
+template<typename T, size_t N>
+inline T Window::Kaiser<T, N>::besselI0(T x) {
+    const T epsilon = T(1e-6);
+    T sum = T(1.0);
+    T term = T(1.0);
+    T k = T(1.0);
+    T factorial = T(1.0);
     while(term > epsilon * sum) {
         factorial *= k;
-        term = std::pow(x / 2.0f, 2 * k) / (factorial * factorial);
+        term = std::pow(x / T(2.0), T(2) * k) / (factorial * factorial);
         sum += term;
-        k += 1.0f;
+        k += T(1.0);
     }
 
     return sum;
 }
 
 // Definitions for sincArray
-template<int iSize, int N>
-inline ReSample<iSize, N>::Sinc::Sinc() : sinc {0} {}
+template<int iSize, int N, typename T>
+inline ReSample<iSize, N, T>::Sinc::Sinc() : sinc {0} {}
 
-template<int iSize, int N>
-inline float& ReSample<iSize, N>::Sinc::operator[](int i) {
+template<int iSize, int N, typename T>
+inline T& ReSample<iSize, N, T>::Sinc::operator[](int i) {
     return sinc[i < 0 ? -i : i];
 }
 
-template<int iSize, int N>
-inline float& ReSample<iSize, N>::Sinc::operator()(int i, int delta) {
+template<int iSize, int N, typename T>
+inline T& ReSample<iSize, N, T>::Sinc::operator()(int i, int delta) {
     if(i < 0) return (*this)[(-i) * iSize - delta];
     return (*this)[i * iSize + delta];
 }
 
-template<int iSize, int N>
-inline void ReSample<iSize, N>::Sinc::configure(float sampleRate) {
-    float fc = sampleRate / 2;
-    float T = 1 / sampleRate;
+template<int iSize, int N, typename T>
+inline void ReSample<iSize, N, T>::Sinc::configure(T sampleRate) {
+    T fc = sampleRate / T(2);
+    T T_ = T(1) / sampleRate;
     for(int i = 0; i <= N; i++) {
         for(int delta = 0; delta < iSize; delta++) {
-            float index =
-                static_cast<float>(i) +
-                (1.0f / static_cast<float>(iSize)) * static_cast<float>(delta);
-            (*this)(i, delta) = std::sin(2.0f * M_PI * fc * index * T) /
-                                (2.0f * M_PI * fc * index * T);
+            T index = static_cast<T>(i) +
+                      (T(1) / static_cast<T>(iSize)) * static_cast<T>(delta);
+            (*this)(i, delta) = std::sin(T(2) * M_PI * fc * index * T_) /
+                                (T(2) * M_PI * fc * index * T_);
         }
     }
-    (*this)[0] = 1;
+    (*this)[0] = T(1);
 }
 
-template<int iSize, int N>
-inline size_t ReSample<iSize, N>::Sinc::size() const {
+template<int iSize, int N, typename T>
+inline size_t ReSample<iSize, N, T>::Sinc::size() const {
     return this->sinc.size();
 }
 
-template<int iSize, int N>
-inline void ReSample<iSize, N>::Sinc::applyKaiser(float beta) {
-    Kaiser<iSize, (N + 1) * iSize * 2> kaiser(beta);
-    kaiser.applyOn(sinc);
+template<int iSize, int N, typename T>
+inline void ReSample<iSize, N, T>::Sinc::applyWindow(
+    Window::Window<T, (N + 1) * iSize * 2>& window) {
+    for(int i = 0; i < (N + 1) * iSize; ++i) {
+        sinc[i] = sinc[i] * window[i + (N + 1) * iSize];
+    }
 }
 
-// Definitions for ReSample
-template<int iSize, int N>
-inline void ReSample<iSize, N>::configure(double sampleRate) {
-    sinc.configure(static_cast<float>(sampleRate));
-    sinc.applyKaiser(5.0f);
+template<int iSize, int N, typename T>
+ReSample<iSize, N, T>::ReSample() : numChannels(0), numSamples(0) {}
+
+template<int iSize, int N, typename T>
+inline void ReSample<iSize, N, T>::configure(T sampleRate) {
+    if(sampleRate <= T(0.0)) {
+        throw std::invalid_argument("Sample rate must be a positive number.");
+    }
+
+    sinc.configure(static_cast<T>(sampleRate));
+    sinc.applyWindow(Window::Kaiser<T, (N + 1) * iSize * 2> k {5.0});
     beginBuf.clear();
     endBuf.clear();
     decBeginBuf.clear();
     decEndBuf.clear();
 }
 
-template<int iSize, int N>
-inline void ReSample<iSize, N>::interpolate(juce::AudioBuffer<float>& buffer) {
-    int channelSize = buffer.getNumChannels();
-    int originalBufSize = buffer.getNumSamples();
-    int interpolatedBufSize = originalBufSize * iSize;
-    beginBuf.resize(channelSize, CircularBuffer<float, N>(0.0f));
-    endBuf.resize(channelSize, CircularBuffer<float, N>(0.0f));
-    juce::AudioBuffer<float> x(channelSize, originalBufSize + N);
-    for(int channel = 0; channel < channelSize; channel++) {
-        x.copyFrom(channel, N, buffer, channel, 0, originalBufSize);
-        float* currentSample = x.getWritePointer(channel);
-        for(int i = 0; i < N; i++) {
-            // forditva masolom bele
-            currentSample[N - i - 1] = endBuf[channel][i];
+template<int iSize, int N, typename T>
+inline void ReSample<iSize, N, T>::interpolate(const T* const* ptrToBuffers,
+                                               int numChannels,
+                                               int numSamples) {
+    if(numChannels <= 0 || numSamples <= 0) {
+        throw std::invalid_argument(
+            "Number of channels and samples must be positive.");
+    }
+    this->numChannels = numChannels;
+    this->numSamples = numSamples;
+    int interpolatedBufSize = numSamples * iSize;
+    beginBuf.resize(numChannels, CircularBuffer<T, N>(T(0.0)));
+    endBuf.resize(numChannels, CircularBuffer<T, N>(T(0.0)));
+    std::vector<std::vector<T>> x(numChannels, std::vector<T>(numSamples + N));
+    for(int channel = 0; channel < numChannels; channel++) {
+        for(int i = 0; i < numSamples + N; ++i) {
+            x[channel][i] =
+                i >= N ? ptrToBuffers[channel][i - N] : endBuf[channel][i];
         }
     }
 
-    interpolatedBuf.setSize(channelSize, interpolatedBufSize, true, true, true);
-    for(int channel = 0; channel < channelSize; channel++) {
-        float const* channelSamples = x.getReadPointer(channel);
-        float* iSamples = interpolatedBuf.getWritePointer(channel);
+    interpolatedBuf.resize(numChannels, std::vector<T>(interpolatedBufSize));
+    for(int channel = 0; channel < numChannels; channel++) {
         // bevart mintak
         // az elsot automatikusan kitoltjuk, hogy a buffereles jo legyen
-        *iSamples = *channelSamples;
+        interpolatedBuf[channel][0] = x[channel][0];
         for(int k = 1; k < interpolatedBufSize; k++) {
             int delta = k % iSize;
             int index = k / iSize;
             if(delta != 0) {
-                iSamples[k] = 0;
+                interpolatedBuf[channel][k] = 0;
                 // mintakbol
                 for(int n = -N; n <= 0; n++) {
-                    iSamples[k] +=
-                        this->sinc(n, delta) * channelSamples[index - n];
+                    interpolatedBuf[channel][k] +=
+                        this->sinc(n, delta) * x[channel][index - n];
                 }
                 // bufferbol
                 for(int n = 1; n <= N; n++) {
-                    iSamples[k] +=
-                        this->sinc(n, delta) * beginBuf[channel][n - 1];
+                    interpolatedBuf[channel][k] +=
+                        this->sinc(n, delta) * beginBuf[channel][N - n];
                 }
             } else {
-                iSamples[k] = channelSamples[index];
-                beginBuf[channel].push(channelSamples[index - 1]);
+                interpolatedBuf[channel][k] = x[channel][index];
+                beginBuf[channel].push(x[channel][index - 1]);
             }
         }
         // az utolso is belekeruljon a bufferbe
-        beginBuf[channel].push(channelSamples[originalBufSize - 1]);
+        beginBuf[channel].push(x[channel][numSamples - 1]);
         // endbuf feltoltese ha kesz minden
         for(int i = 0; i < N; i++) {
-            endBuf[channel].push(channelSamples[originalBufSize + i]);
+            endBuf[channel].push(x[channel][numSamples + i]);
         }
     }
 }
 
-template<int iSize, int N>
-inline void ReSample<iSize, N>::decimate(juce::AudioBuffer<float>& buffer) {
-    int channelSize = buffer.getNumChannels();
-    int originalBufSize = buffer.getNumSamples();
-    int interpolatedBufSize = this->interpolatedBuf.getNumSamples();
-    decBeginBuf.resize(channelSize, CircularBuffer<float, N * iSize>(0.0f));
-    decEndBuf.resize(channelSize, CircularBuffer<float, N * iSize>(0.0f));
+template<int iSize, int N, typename T>
+inline void ReSample<iSize, N, T>::decimate(T* const* ptrToBuffers) {
+    int interpolatedBufSize = numSamples * iSize;
+    decBeginBuf.resize(numChannels, CircularBuffer<T, N * iSize>(T(0.0)));
+    decEndBuf.resize(numChannels, CircularBuffer<T, N * iSize>(T(0.0)));
 
     // bepakolni az elozo veget az elejere
-    juce::AudioBuffer<float> x(channelSize, interpolatedBufSize + N * iSize);
-    for(int channel = 0; channel < channelSize; channel++) {
-        x.copyFrom(channel,
-                   N * iSize,
-                   interpolatedBuf,
-                   channel,
-                   0,
-                   interpolatedBufSize);
-        float* currentSample = x.getWritePointer(channel);
-        for(int i = 0; i < N * iSize; i++) {
-            currentSample[N * iSize - i - 1] = decEndBuf[channel][i];
+    std::vector<std::vector<T>> x(
+        numChannels, std::vector<T>(interpolatedBufSize + N * iSize));
+    for(int channel = 0; channel < numChannels; channel++) {
+        for(int i = 0; i < interpolatedBufSize + N * iSize; ++i) {
+            x[channel][i] = i >= N * iSize ?
+                                interpolatedBuf[channel][i - N * iSize] :
+                                decEndBuf[channel][i];
         }
     }
 
-    for(int channel = 0; channel < channelSize; channel++) {
-        float const* iSamples = x.getReadPointer(channel);
-        float* samples = buffer.getWritePointer(channel);
-        for(int k = 0; k < originalBufSize; k++) {
+    for(int channel = 0; channel < numChannels; channel++) {
+        for(int k = 0; k < numSamples; k++) {
             int index = iSize * k;
-            samples[k] = 0;
+            ptrToBuffers[channel][k] = 0;
 
             // bufferbol
             for(int n = 1; n <= N * iSize; n++) {
-                samples[k] += sinc[n] * decBeginBuf[channel][n - 1];
+                ptrToBuffers[channel][k] +=
+                    sinc[n] * decBeginBuf[channel][N * iSize - n];
             }
 
             // mintakbol
             for(int n = 0; n >= -(N * iSize); n--) {
-                samples[k] += sinc[n] * iSamples[index - n];
+                ptrToBuffers[channel][k] += sinc[n] * x[channel][index - n];
             }
 
             // az elemek visszapusholasa 0-3
             for(int i = 0; i < iSize; i++) {
-                decBeginBuf[channel].push(iSamples[index + i]);
+                decBeginBuf[channel].push(x[channel][index + i]);
             }
 
-            samples[k] /= iSize;
+            ptrToBuffers[channel][k] /= iSize;
         }
 
         // endbuf feltoltese ha kesz minden
         for(int i = 0; i < N * iSize; i++) {
-            decEndBuf[channel].push(iSamples[interpolatedBufSize + i]);
+            decEndBuf[channel].push(x[channel][interpolatedBufSize + i]);
         }
     }
 }
 
-template<int iSize, int N>
-inline void ReSample<iSize, N>::process(
-    std::function<void(juce::AudioBuffer<float>&)> processBlock) {
-    processBlock(this->interpolatedBuf);
-}
-
-template<class T, size_t size>
-inline CircularBuffer<T, size>::CircularBuffer(T initValue) :
-    oldestIndex {0}, buf {std::move(initValue)} {}
-
-template<class T, size_t size>
-inline void CircularBuffer<T, size>::push(T element) {
-    this->buf[this->oldestIndex] = std::move(element);
-    this->oldestIndex = this->oldestIndex == size ? 0 : oldestIndex + 1;
-}
-
-template<class T, size_t size>
-inline T& CircularBuffer<T, size>::operator[](size_t index) {
-    return this->buf[(this->oldestIndex - index - 1 + size) % size];
-}
-
-template<class T, size_t size>
-inline void CircularBuffer<T, size>::clear() {
-    memset(this->buf.data(), T {0}, size * sizeof(T));
-    this->oldestIndex = 0;
+template<int iSize, int N, typename T>
+inline void ReSample<iSize, N, T>::process(
+    std::function<void(std::vector<std::vector<T>>)> processBlock) {
+    processBlock(interpolatedBuf);
 }
