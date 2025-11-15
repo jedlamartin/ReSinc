@@ -238,7 +238,7 @@ int main() {
     std::cout << "\n## Test 4: ReSample<double, 4, 32> (Multi-block) ##"
               << std::endl;
     try {
-        ReSample<double, 4, 32> resampler_d;
+        ReSample<4, 32, double> resampler_d;
         resampler_d.configure(96000.0);
 
         std::vector<std::vector<double>> inBlock1, inBlock2, outBlock1,

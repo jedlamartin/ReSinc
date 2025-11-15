@@ -64,8 +64,8 @@ namespace Window {
     class Window {
     public:
         virtual ~Window() = default;
-        Window(const Window&) = delete;
-        Window(Window&&) = delete;
+        Window(const Window&) = default;
+        Window(Window&&) = default;
         Window& operator=(const Window&) = delete;
         Window& operator=(Window&&) = delete;
 
@@ -95,8 +95,8 @@ namespace Window {
     public:
         Kaiser(T beta);
         ~Kaiser() = default;
-        Kaiser(const Kaiser&) = delete;
-        Kaiser(Kaiser&&) = delete;
+        Kaiser(const Kaiser&) = default;
+        Kaiser(Kaiser&&) = default;
         Kaiser& operator=(const Kaiser&) = delete;
         Kaiser& operator=(Kaiser&&) = delete;
 
@@ -145,15 +145,10 @@ public:
                      int numSamples);
     void decimate(T* const* ptrToBuffers);
 
-    void process(std::function<void(std::vector<std::vector<T>>)> processBlock);
+    void process(
+        std::function<void(std::vector<std::vector<T>>&)> processBlock);
 
 private:
-    Sinc<iSize, N> sinc;
-    std::vector<std::vector<T>> interpolatedBuf;
-    std::vector<CircularBuffer<T, N>> beginBuf, endBuf;
-    std::vector<CircularBuffer<T, N * iSize>> decBeginBuf, decEndBuf;
-    size_t numChannels;
-    size_t numSamples;
     /**
      * @brief Precomputed Sinc lookup table used for interpolation/decimation.
      *
@@ -186,8 +181,14 @@ private:
         T& operator()(int i, int delta);
         void configure(T sampleRate);
         size_t size() const;
-        void applyWindow(Window::Window<T, (N + 1) * iSize * 2>& window);
+        void applyWindow(Window::Window<T, (N + 1) * iSize * 2> window);
     };
+    Sinc sinc;
+    std::vector<std::vector<T>> interpolatedBuf;
+    std::vector<CircularBuffer<T, N>> beginBuf, endBuf;
+    std::vector<CircularBuffer<T, N * iSize>> decBeginBuf, decEndBuf;
+    size_t numChannels;
+    size_t numSamples;
 };
 
 // CircularBuffer definitions
@@ -305,7 +306,7 @@ inline size_t ReSample<iSize, N, T>::Sinc::size() const {
 
 template<int iSize, int N, typename T>
 inline void ReSample<iSize, N, T>::Sinc::applyWindow(
-    Window::Window<T, (N + 1) * iSize * 2>& window) {
+    Window::Window<T, (N + 1) * iSize * 2> window) {
     for(int i = 0; i < (N + 1) * iSize; ++i) {
         sinc[i] = sinc[i] * window[i + (N + 1) * iSize];
     }
@@ -321,7 +322,7 @@ inline void ReSample<iSize, N, T>::configure(T sampleRate) {
     }
 
     sinc.configure(static_cast<T>(sampleRate));
-    sinc.applyWindow(Window::Kaiser<T, (N + 1) * iSize * 2> k {5.0});
+    sinc.applyWindow(Window::Kaiser<T, (N + 1) * iSize * 2> {5.0});
     beginBuf.clear();
     endBuf.clear();
     decBeginBuf.clear();
@@ -433,6 +434,6 @@ inline void ReSample<iSize, N, T>::decimate(T* const* ptrToBuffers) {
 
 template<int iSize, int N, typename T>
 inline void ReSample<iSize, N, T>::process(
-    std::function<void(std::vector<std::vector<T>>)> processBlock) {
+    std::function<void(std::vector<std::vector<T>>&)> processBlock) {
     processBlock(interpolatedBuf);
 }
