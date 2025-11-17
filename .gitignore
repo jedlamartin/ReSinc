@@ -1,0 +1,6 @@
+main
+.vscode/*
+build/*
+*.o
+main
+CMakeLists.txt
