@@ -12,7 +12,7 @@ It's designed for use in real-time audio applications (like VST/AU plugins) wher
 * **Real-Time Safe:** All memory is pre-allocated on initialization. The real-time processing functions (`interpolate`, `decimate`, `process`) are guaranteed not to allocate heap memory, lock, or block, making them safe for any high-priority audio thread.
 * **High-Quality:** Uses a Kaiser-windowed Sinc filter for "perfect" reconstruction and anti-aliasing.
 * **Simple Workflow:** Provides a clear `interpolate()` -> `process()` -> `decimate()` workflow.
-* **Header-Only:** Just drop `Oversampler.hpp` into your project and include it.
+* **Header-Only:** Just drop `ReSinc.hpp` into your project and include it.
 * **Flexible & Template-Based:** Fully configurable via template parameters:
     * `TYPE`: Sample type (`float` or `double`).
     * `OVERSAMPLE_FACTOR`: The factor to oversample by (e.g., `2`, `4`, `8`).
