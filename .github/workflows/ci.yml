@@ -1,0 +1,21 @@
+name: C++ CI
+
+# This workflow runs on any push or pull request
+on: [push, pull_request]
+
+jobs:
+  build_and_test:
+    # Use the latest version of Ubuntu
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checks out your repository's code
+      - uses: actions/checkout@v4
+
+      # 2. Compiles your test file
+      - name: Compile tests
+        run: g++ tests/tests.cpp -o run_tests -std=c++17 -O3 -Wall -Werror
+
+      # 3. Runs your compiled test executable
+      - name: Run tests
+        run: ./run_tests
