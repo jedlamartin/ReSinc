@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Language](https://img.shields.io/badge/language-C%2B%2B-blue.svg)
 
-`ReSinc` is a lightweight, real-time safe, header-only C++ library for high-quality, anti-aliased audio oversampling.
+`ReSinc` is a lightweight, real-time safe, header-only C++ library for audio oversampling.
 
 It's designed for use in real-time audio applications (like VST/AU plugins) where running a non-linear process (distortion, saturation, etc.) at a higher sample rate is necessary to prevent aliasing artifacts. The library uses a pre-calculated, windowed Sinc filter for interpolation and decimation, ensuring high-fidelity results.
 
