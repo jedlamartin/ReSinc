@@ -317,6 +317,45 @@ private:
                          int numSamples);
 };
 
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256>
+class Resampler {
+public:
+    Resampler();
+    ~Resampler() = default;
+    Resampler(const Resampler&) = delete;
+    Resampler& operator=(const Resampler&) = delete;
+    Resampler(Resampler&&) noexcept = default;
+    Resampler& operator=(Resampler&&) noexcept = default;
+
+    void configure(TYPE sampleRate,
+                   int maxChannels,
+                   int maxBlockSize,
+                   TYPE targetSampleRate);
+
+    template<typename T>
+    typename std::enable_if_t<
+        resinc_traits::is_single_channel<std::decay_t<T>>::value>
+        resample(T&& input, T& output);
+
+    template<typename T>
+    typename std::enable_if_t<
+        resinc_traits::is_multi_channel<std::decay_t<T>>::value>
+        resample(T&& input, T& output);
+
+    void resample(const TYPE* const* ptrToInBuffers,
+                  TYPE* const* ptrToBuffers,
+                  int numChannels,
+                  int numSamples);
+
+private:
+    Oversampler<TYPE, RESOLUTION, SINC_RADIUS>::Sinc sinc;
+    std::vector<CircularBuffer<TYPE, SINC_RADIUS>> inputBuffer;
+    void resample_helper(const TYPE* const* ptrToInBuffers,
+                         TYPE* const* ptrToOutBuffers,
+                         int numChannels,
+                         int numSamples);
+};
+
 // =============================================================================
 //  IMPLEMENTATIONS: CircularBuffer
 // =============================================================================
