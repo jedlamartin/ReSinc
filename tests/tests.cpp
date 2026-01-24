@@ -10,6 +10,7 @@
 #include "ReSinc.hpp"
 
 // --- Helper Functions ---
+
 template<typename TYPE>
 void generateSine(std::vector<std::vector<TYPE>>& buffer,
                   int numChannels,
@@ -38,8 +39,8 @@ void printBuffer(const std::string& title,
         std::cout << "Buffer is empty." << std::endl;
         return;
     }
-    int numChannels = buffer.size();
-    int numSamples = buffer[0].size();
+    int numChannels = (int) buffer.size();
+    int numSamples = (int) buffer[0].size();
     std::cout << "Channels: " << numChannels << ", Samples: " << numSamples
               << std::endl;
 
@@ -56,27 +57,6 @@ void printBuffer(const std::string& title,
                   << std::endl;
     }
     std::cout << "--------------------" << std::endl << std::endl;
-}
-
-template<typename TYPE>
-std::vector<const TYPE*> createConstPointerArray(
-    const std::vector<std::vector<TYPE>>& buffer) {
-    std::vector<const TYPE*> pointers;
-    pointers.reserve(buffer.size());
-    for(const auto& channel : buffer) {
-        pointers.push_back(channel.data());
-    }
-    return pointers;
-}
-
-template<typename TYPE>
-std::vector<TYPE*> createPointerArray(std::vector<std::vector<TYPE>>& buffer) {
-    std::vector<TYPE*> pointers;
-    pointers.reserve(buffer.size());
-    for(auto& channel : buffer) {
-        pointers.push_back(channel.data());
-    }
-    return pointers;
 }
 
 template<typename TYPE>
@@ -180,11 +160,9 @@ int main() {
         generateSine(inputBuffer, CHANNELS, SAMPLES_IN, 440.0f, 44100.0f);
         outputBuffer.assign(CHANNELS, std::vector<float>(SAMPLES_IN, 0.0f));
 
-        auto inputPointers = createConstPointerArray(inputBuffer);
-        auto outputPointers = createPointerArray(outputBuffer);
-
-        oversampler.interpolate(inputPointers.data(), CHANNELS, SAMPLES_IN);
-        oversampler.decimate(outputPointers.data(), CHANNELS, SAMPLES_IN);
+        // NEW API: Pass vectors directly!
+        oversampler.interpolate(inputBuffer);
+        oversampler.decimate(outputBuffer);
 
         printBuffer("Input (Float)", inputBuffer, 10);
         printBuffer("Output (Float)", outputBuffer, 10);
@@ -244,11 +222,10 @@ int main() {
         inputBuffer[0][0] = 1.0f;    // Simple impulse
         outputBuffer.assign(CHANNELS, std::vector<float>(SAMPLES_IN, 0.0f));
 
-        auto inputPointers = createConstPointerArray(inputBuffer);
-        auto outputPointers = createPointerArray(outputBuffer);
+        // NEW API: Vectors
+        oversampler.interpolate(inputBuffer);
 
-        oversampler.interpolate(inputPointers.data(), CHANNELS, SAMPLES_IN);
-
+        // NEW API: generic process callback
         oversampler.process(
             [&](std::vector<std::vector<float>>& internalBuffer) {
                 std::cout << "-> process() lambda called. Overwriting [0][0]."
@@ -256,7 +233,7 @@ int main() {
                 internalBuffer[0][0] = 1.2345f;
             });
 
-        oversampler.decimate(outputPointers.data(), CHANNELS, SAMPLES_IN);
+        oversampler.decimate(outputBuffer);
 
         float expected = 1.2345f / OVERSAMPLE_FACTOR;
         float actual = outputBuffer[0][SINC_RADIUS];
@@ -320,30 +297,18 @@ int main() {
                   inContinuous[0].end(),
                   inBlock2[0].begin());
 
-        auto inPtr1 = createConstPointerArray(inBlock1);
-        auto inPtr2 = createConstPointerArray(inBlock2);
-        auto outPtr1 = createPointerArray(outBlock1);
-        auto outPtr2 = createPointerArray(outBlock2);
-
+        // NEW API: Pass vectors directly
         std::cout << "Processing Block 1..." << std::endl;
-        oversampler_block.interpolate(
-            inPtr1.data(), CHANNELS_D, SAMPLES_PER_BLOCK);
-        oversampler_block.decimate(
-            outPtr1.data(), CHANNELS_D, SAMPLES_PER_BLOCK);
+        oversampler_block.interpolate(inBlock1);
+        oversampler_block.decimate(outBlock1);
 
         std::cout << "Processing Block 2..." << std::endl;
-        oversampler_block.interpolate(
-            inPtr2.data(), CHANNELS_D, SAMPLES_PER_BLOCK);
-        oversampler_block.decimate(
-            outPtr2.data(), CHANNELS_D, SAMPLES_PER_BLOCK);
+        oversampler_block.interpolate(inBlock2);
+        oversampler_block.decimate(outBlock2);
 
         std::cout << "Processing Ground Truth..." << std::endl;
-        auto inPtrTruth = createConstPointerArray(inContinuous);
-        auto outPtrTruth = createPointerArray(outTruth);
-        oversampler_truth.interpolate(
-            inPtrTruth.data(), CHANNELS_D, TOTAL_SAMPLES);
-        oversampler_truth.decimate(
-            outPtrTruth.data(), CHANNELS_D, TOTAL_SAMPLES);
+        oversampler_truth.interpolate(inContinuous);
+        oversampler_truth.decimate(outTruth);
 
         std::vector<std::vector<double>> outTruth1(
             CHANNELS_D, std::vector<double>(SAMPLES_PER_BLOCK));
@@ -413,8 +378,10 @@ int main() {
     try {
         Oversampler<float, 4, 32> oversampler;
         oversampler.configure(44100.0f, 1, 128);
-        std::cout << "Testing interpolate(0 channels)... ";
-        oversampler.interpolate(nullptr, 0, 10);
+        std::cout << "Testing interpolate(nullptr, 0 channels)... ";
+        // Explicitly calling raw pointer overload to test bounds checking
+        const float* const* nullPtr = nullptr;
+        oversampler.interpolate(nullPtr, 0, 10);
         std::cout << "!!! FAILED: No exception thrown !!!" << std::endl;
         allTestsPassed = false;
     } catch(const std::invalid_argument& e) {
