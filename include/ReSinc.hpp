@@ -130,6 +130,29 @@ namespace Window {
     };
 }    // namespace Window
 
+namespace internal {
+    /**
+     * @brief Internal Sinc lookup table.
+     * Handles symmetric storage and fractional indexing.
+     */
+    template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
+    class Sinc {
+    private:
+        std::array<TYPE, (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR> sinc;
+
+    public:
+        Sinc();
+        TYPE& operator[](int i);
+        TYPE& operator()(int i, int delta);
+        void configure(TYPE sampleRate);
+        size_t size() const;
+        void applyWindow(
+            const Window::Window<TYPE,
+                                 (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR * 2>&
+                window);
+    };
+}    // namespace internal
+
 // =============================================================================
 //  OVERSAMPLER CLASS
 // =============================================================================
@@ -282,27 +305,7 @@ public:
     void process(std::function<void(std::vector<TYPE>&)> processBlock);
 
 private:
-    /**
-     * @brief Internal Sinc lookup table.
-     * Handles symmetric storage and fractional indexing.
-     */
-    class Sinc {
-    private:
-        std::array<TYPE, (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR> sinc;
-
-    public:
-        Sinc();
-        TYPE& operator[](int i);
-        TYPE& operator()(int i, int delta);
-        void configure(TYPE sampleRate);
-        size_t size() const;
-        void applyWindow(
-            const Window::Window<TYPE,
-                                 (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR * 2>&
-                window);
-    };
-
-    Sinc sinc;
+    internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS> sinc;
     std::vector<std::vector<TYPE>> interpolatedBuf;
     std::vector<CircularBuffer<TYPE, SINC_RADIUS>> beginBuf, endBuf;
     std::vector<CircularBuffer<TYPE, SINC_RADIUS * OVERSAMPLE_FACTOR>>
@@ -328,9 +331,9 @@ public:
     Resampler& operator=(Resampler&&) noexcept = default;
 
     void configure(TYPE sampleRate,
+                   TYPE targetSampleRate,
                    int maxChannels,
-                   int maxBlockSize,
-                   TYPE targetSampleRate);
+                   int maxBlockSize);
 
     template<typename T>
     typename std::enable_if_t<
@@ -348,8 +351,10 @@ public:
                   int numSamples);
 
 private:
-    Oversampler<TYPE, RESOLUTION, SINC_RADIUS>::Sinc sinc;
-    std::vector<CircularBuffer<TYPE, SINC_RADIUS>> inputBuffer;
+    internal::Sinc<TYPE, RESOLUTION, SINC_RADIUS> sinc;
+    std::vector<CircularBuffer<TYPE, SINC_RADIUS>> beginBuf, endBuf;
+    std::vector<CircularBuffer<TYPE, SINC_RADIUS>> x;
+    TYPE current_phase;
     void resample_helper(const TYPE* const* ptrToInBuffers,
                          TYPE* const* ptrToOutBuffers,
                          int numChannels,
@@ -444,16 +449,15 @@ TYPE Window::Kaiser<TYPE, N>::besselI0(TYPE x) {
 // =============================================================================
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::Sinc() : sinc {0} {}
+internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc() : sinc {0} {}
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-TYPE& Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::operator[](
-    int i) {
+TYPE& internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::operator[](int i) {
     return sinc[i < 0 ? -i : i];
 }
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-TYPE& Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::operator()(
+TYPE& internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::operator()(
     int i,
     int delta) {
     if(i < 0) return (*this)[(-i) * OVERSAMPLE_FACTOR - delta];
@@ -461,7 +465,7 @@ TYPE& Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::operator()(
 }
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::configure(
+void internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::configure(
     TYPE sampleRate) {
     TYPE fc = sampleRate / TYPE(2);
     TYPE T_ = TYPE(1) / sampleRate;
@@ -479,12 +483,12 @@ void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::configure(
 }
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-size_t Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::size() const {
+size_t internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::size() const {
     return this->sinc.size();
 }
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::Sinc::applyWindow(
+void internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::applyWindow(
     const Window::Window<TYPE, (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR * 2>&
         window) {
     for(int i = 0; i < (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR; ++i)
@@ -524,6 +528,8 @@ void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::configure(
         maxChannels,
         CircularBuffer<TYPE, SINC_RADIUS * OVERSAMPLE_FACTOR>(TYPE(0.0)));
 
+    x_interp.clear();
+    x_decim.clear();
     x_interp.resize(maxChannels, std::vector<TYPE>(maxBlockSize + SINC_RADIUS));
     x_decim.resize(maxChannels,
                    std::vector<TYPE>(maxInterpolatedSize +
@@ -742,3 +748,38 @@ void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::decimate_helper(
             decEndBuf[channel].push(x_decim[channel][interpolatedBufSize + i]);
     }
 }
+
+// =============================================================================
+//  IMPLEMENTATIONS: Resampler Lifecycle
+// =============================================================================
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+Resampler<TYPE, SINC_RADIUS, RESOLUTION>::Resampler() {}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::configure(TYPE sampleRate,
+                                                         TYPE targetSampleRate,
+                                                         int maxChannels,
+                                                         int maxBlockSize) {
+    if(sampleRate <= TYPE(0.0) || targetSampleRate <= TYPE(0.0) ||
+       maxChannels <= 0 || maxBlockSize <= 0)
+        throw std::invalid_argument("Invalid configuration.");
+
+    sinc.configure(sampleRate);
+    sinc.applyWindow(
+        Window::Kaiser<TYPE, (SINC_RADIUS + 1) * RESOLUTION * 2> {5.0});
+
+    current_phase = TYPE(0.0);
+    int maxInterpolatedSize =
+        maxBlockSize * static_cast<int>(targetSampleRate / sampleRate + 1);
+    beginBuf.clear();
+    endBuf.clear();
+    beginBuf.resize(maxChannels, CircularBuffer<TYPE, SINC_RADIUS>(TYPE(0.0)));
+    endBuf.resize(maxChannels, CircularBuffer<TYPE, SINC_RADIUS>(TYPE(0.0)));
+
+    x.clear();
+    x.resize(maxChannels, std::vector<TYPE>(maxBlockSize + SINC_RADIUS));
+}
+
+// =============================================================================
+//  IMPLEMENTATIONS: Interpolate
+// =============================================================================
