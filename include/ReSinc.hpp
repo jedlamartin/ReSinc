@@ -145,6 +145,7 @@ namespace internal {
         TYPE& operator[](int i);
         TYPE& operator()(int i, int delta);
         void configure(TYPE sampleRate);
+        void configure_with_cutoff(TYPE cutoff, TYPE sampleRate);
         size_t size() const;
         void applyWindow(
             const Window::Window<TYPE,
@@ -320,6 +321,27 @@ private:
                          int numSamples);
 };
 
+// =============================================================================
+//  RESAMPLER CLASS
+// =============================================================================
+
+/**
+ * @brief Multi-channel asynchronous resampler (real-time / streaming-safe).
+ *
+ * Resampler converts between arbitrary sample rates using a precomputed
+ * Sinc table with high-resolution phase lookup. Unlike the Oversampler,
+ * it handles non-integer ratios and maintains internal phase state for
+ * seamless multi-block processing.
+ *
+ * Important notes:
+ * - Internal buffering: The class maintains history and phase across calls.
+ * - Gain scaling: Automatically applies compensation when downsampling.
+ *
+ * Template parameters:
+ * @tparam TYPE       Sample type (float, double).
+ * @tparam SINC_RADIUS Sinc kernel radius (taps per side).
+ * @tparam RESOLUTION  Fractional phase lookup resolution.
+ */
 template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256>
 class Resampler {
 public:
@@ -330,40 +352,72 @@ public:
     Resampler(Resampler&&) noexcept = default;
     Resampler& operator=(Resampler&&) noexcept = default;
 
+    /**
+     * @brief Configures internal buffers for arbitrary rate conversion.
+     * Must be called before processing.
+     * @param sampleRate The base sample rate of the input signal.
+     * @param targetSampleRate The target output sample rate.
+     * @param maxChannels Maximum number of channels expected.
+     * @param maxBlockSize Maximum number of samples per input block.
+     */
     void configure(TYPE sampleRate,
                    TYPE targetSampleRate,
                    int maxChannels,
                    int maxBlockSize);
 
+    /**
+     * @brief Resamples a JUCE-style AudioBuffer.
+     * @return The number of output samples produced.
+     */
     template<typename T>
-    typename std::enable_if_t<
-        resinc_traits::is_juce_type<std::decay_t<T>>::value>
+    typename std::
+        enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value, int>
         resample(T&& input, T& output);
 
+    /**
+     * @brief Resamples a single-channel container.
+     * @return The number of output samples produced.
+     */
     template<typename T>
     typename std::enable_if_t<
-        resinc_traits::is_single_channel<std::decay_t<T>>::value>
+        resinc_traits::is_single_channel<std::decay_t<T>>::value,
+        int>
         resample(T&& input, T& output);
 
+    /**
+     * @brief Resamples a multi-channel container (vector of vectors).
+     * @return The number of output samples produced.
+     */
     template<typename T>
     typename std::enable_if_t<
-        resinc_traits::is_multi_channel<std::decay_t<T>>::value>
+        resinc_traits::is_multi_channel<std::decay_t<T>>::value,
+        int>
         resample(T&& input, T& output);
 
-    void resample(const TYPE* const* ptrToInBuffers,
-                  TYPE* const* ptrToBuffers,
-                  int numChannels,
-                  int numSamples);
+    /**
+     * @brief Resamples from raw pointers (Base Implementation).
+     * @param ptrToInBuffers Array of pointers to input channel data.
+     * @param ptrToBuffers Array of pointers to output channel data.
+     * @param numChannels Number of channels to process.
+     * @param numSamples Number of input samples to read.
+     * @return The number of output samples produced.
+     */
+    int resample(const TYPE* const* ptrToInBuffers,
+                 TYPE* const* ptrToBuffers,
+                 int numChannels,
+                 int numSamples);
 
 private:
     internal::Sinc<TYPE, RESOLUTION, SINC_RADIUS> sinc;
     std::vector<CircularBuffer<TYPE, SINC_RADIUS>> beginBuf, endBuf;
-    std::vector<CircularBuffer<TYPE, SINC_RADIUS>> x;
+    std::vector<std::vector<TYPE>> x;
     TYPE current_phase;
-    void resample_helper(const TYPE* const* ptrToInBuffers,
-                         TYPE* const* ptrToOutBuffers,
-                         int numChannels,
-                         int numSamples);
+    TYPE maxOutputSize;
+    TYPE oversampleFactor;
+    int resample_helper(const TYPE* const* ptrToInBuffers,
+                        TYPE* const* ptrToOutBuffers,
+                        int numChannels,
+                        int numSamples);
 };
 
 // =============================================================================
@@ -483,6 +537,27 @@ void internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::configure(
             else
                 (*this)(i, delta) = std::sin(TYPE(2) * M_PI * fc * index * T_) /
                                     (TYPE(2) * M_PI * fc * index * T_);
+        }
+    }
+}
+
+template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
+void internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::
+    configure_with_cutoff(TYPE cutoff, TYPE sampleRate) {
+    if(cutoff <= TYPE(0.0) || cutoff > sampleRate / TYPE(2.0))
+        throw std::invalid_argument(
+            "Cutoff frequency must be between 0 and Nyquist frequency.");
+    TYPE T_ = TYPE(1) / sampleRate;
+    for(int i = 0; i <= SINC_RADIUS; i++) {
+        for(int delta = 0; delta < OVERSAMPLE_FACTOR; delta++) {
+            TYPE index = static_cast<TYPE>(i) +
+                         (TYPE(1) / static_cast<TYPE>(OVERSAMPLE_FACTOR)) *
+                             static_cast<TYPE>(delta);
+            if(index == TYPE(0.0)) (*this)(i, delta) = TYPE(1.0);
+            else
+                (*this)(i, delta) =
+                    std::sin(TYPE(2) * M_PI * cutoff * index * T_) /
+                    (TYPE(2) * M_PI * cutoff * index * T_);
         }
     }
 }
@@ -676,7 +751,6 @@ void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::interpolate_helper(
         throw std::runtime_error(
             "Oversampler: Input size exceeds configured maxBlockSize.");
 
-    int interpolatedBufSize = numSamples * OVERSAMPLE_FACTOR;
     for(int channel = 0; channel < numChannels; channel++) {
         for(int i = 0; i < numSamples + SINC_RADIUS; ++i) {
             x_interp[channel][i] =
@@ -684,6 +758,8 @@ void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::interpolate_helper(
                                     endBuf[channel][i]);
         }
     }
+
+    int interpolatedBufSize = numSamples * OVERSAMPLE_FACTOR;
 
     for(int channel = 0; channel < numChannels; channel++) {
         interpolatedBuf[channel][0] = x_interp[channel][0];
@@ -769,20 +845,22 @@ void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::configure(TYPE sampleRate,
        maxChannels <= 0 || maxBlockSize <= 0)
         throw std::invalid_argument("Invalid configuration.");
 
-    sinc.configure(sampleRate);
+    TYPE cutoff = std::min(sampleRate, targetSampleRate) / 2.0;
+    sinc.configure_with_cutoff(cutoff, sampleRate);
     sinc.applyWindow(
         Window::Kaiser<TYPE, (SINC_RADIUS + 1) * RESOLUTION * 2> {5.0});
 
     current_phase = TYPE(0.0);
-    int maxInterpolatedSize =
+    maxOutputSize =
         maxBlockSize * static_cast<int>(targetSampleRate / sampleRate + 1);
+    oversampleFactor = targetSampleRate / sampleRate;
     beginBuf.clear();
     endBuf.clear();
     beginBuf.resize(maxChannels, CircularBuffer<TYPE, SINC_RADIUS>(TYPE(0.0)));
     endBuf.resize(maxChannels, CircularBuffer<TYPE, SINC_RADIUS>(TYPE(0.0)));
 
     x.clear();
-    x.resize(maxChannels, std::vector<TYPE>(maxBlockSize + SINC_RADIUS));
+    x.resize(maxChannels, std::vector<TYPE>(maxBlockSize + SINC_RADIUS + 1));
 }
 
 // =============================================================================
@@ -790,57 +868,59 @@ void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::configure(TYPE sampleRate,
 // =============================================================================
 template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
 template<typename T>
-typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value>
+typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
+                          int>
     Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
-    resample_helper(input.getArrayOfReadPointers(),
-                    output.getArrayOfWritePointers(),
-                    input.getNumChannels(),
-                    output.getNumSamples());
+    return resample_helper(input.getArrayOfReadPointers(),
+                           output.getArrayOfWritePointers(),
+                           input.getNumChannels(),
+                           output.getNumSamples());
 }
 
 template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
 template<typename T>
-typename std::enable_if_t<
-    resinc_traits::is_single_channel<std::decay_t<T>>::value>
+typename std::
+    enable_if_t<resinc_traits::is_single_channel<std::decay_t<T>>::value, int>
     Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
     const TYPE* ptr = input.data();
     TYPE* outPtr = output.data();
-    resample_helper(&ptr, &outPtr, 1, static_cast<int>(input.size()));
+    return resample_helper(&ptr, &outPtr, 1, static_cast<int>(input.size()));
 }
 
 template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
 template<typename T>
-typename std::enable_if_t<
-    resinc_traits::is_multi_channel<std::decay_t<T>>::value>
+typename std::
+    enable_if_t<resinc_traits::is_multi_channel<std::decay_t<T>>::value, int>
     Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
     int channels = static_cast<int>(input.size());
-    if(channels == 0) return;
+    if(channels == 0) return 0;
     std::vector<const TYPE*> inPtrs(channels);
     std::vector<TYPE*> outPtrs(channels);
     for(int i = 0; i < channels; i++) {
         inPtrs[i] = input[i].data();
         outPtrs[i] = output[i].data();
     }
-    resample_helper(inPtrs.data(),
-                    outPtrs.data(),
-                    channels,
-                    static_cast<int>(input[0].size()));
+    return resample_helper(inPtrs.data(),
+                           outPtrs.data(),
+                           channels,
+                           static_cast<int>(input[0].size()));
 }
 
 template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
-void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(
+int Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(
     const TYPE* const* ptrToInBuffers,
     TYPE* const* ptrToBuffers,
     int numChannels,
     int numSamples) {
-    resample_helper(ptrToInBuffers, ptrToBuffers, numChannels, numSamples);
+    return resample_helper(
+        ptrToInBuffers, ptrToBuffers, numChannels, numSamples);
 }
 
 // =============================================================================
 //  IMPLEMENTATIONS: Helpers
 // =============================================================================
 template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
-void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample_helper(
+int Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample_helper(
     const TYPE* const* ptrToInBuffers,
     TYPE* const* ptrToOutBuffers,
     int numChannels,
@@ -855,6 +935,54 @@ void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample_helper(
         throw std::runtime_error(
             "Resampler: Input size exceeds configured maxBlockSize.");
 
-    // TODO: Implement resampling logic using the Sinc table and phase
-    // accumulator.
+    for(int channel = 0; channel < numChannels; channel++) {
+        for(int i = 0; i < numSamples + SINC_RADIUS; ++i) {
+            x[channel][i] =
+                (i >= SINC_RADIUS ? ptrToInBuffers[channel][i - SINC_RADIUS] :
+                                    endBuf[channel][i]);
+        }
+    }
+
+    int outputCount =
+        static_cast<int>((numSamples - current_phase) * oversampleFactor);
+
+    TYPE gainScale = (oversampleFactor < 1.0) ?
+                         static_cast<TYPE>(oversampleFactor) :
+                         TYPE(1.0);
+    int delta;
+    for(int channel = 0; channel < numChannels; channel++) {
+        for(int k = 0; k < outputCount; ++k) {
+            int index = static_cast<int>(
+                (static_cast<double>(k) / oversampleFactor) + current_phase);
+            delta =
+                static_cast<int>(((static_cast<double>(k) / oversampleFactor) +
+                                  current_phase - index) *
+                                 RESOLUTION);
+            if(delta != 0) {
+                ptrToOutBuffers[channel][k] = 0;
+                for(int n = -SINC_RADIUS; n <= 0; n++)
+                    ptrToOutBuffers[channel][k] +=
+                        this->sinc(n, delta) * x[channel][index - n];
+                for(int n = 1; n <= SINC_RADIUS; n++)
+                    ptrToOutBuffers[channel][k] +=
+                        this->sinc(n, delta) *
+                        beginBuf[channel][SINC_RADIUS - n];
+            } else {
+                ptrToOutBuffers[channel][k] = x[channel][index];
+
+                if(index > 0) {
+                    beginBuf[channel].push(x[channel][index - 1]);
+                } else {
+                    beginBuf[channel].push(beginBuf[channel][SINC_RADIUS - 1]);
+                }
+            }
+            ptrToOutBuffers[channel][k] *= gainScale;
+        }
+        beginBuf[channel].push(x[channel][numSamples - 1]);
+        for(int i = 0; i < SINC_RADIUS; i++)
+            endBuf[channel].push(x[channel][numSamples + i]);
+    }
+    current_phase =
+        (current_phase + (outputCount / oversampleFactor)) - numSamples;
+    return outputCount;
 }

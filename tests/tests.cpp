@@ -402,6 +402,122 @@ int main() {
         std::cout << "!!! FAILED: Wrong exception type thrown." << std::endl;
         allTestsPassed = false;
     }
+
+    // ---
+    // Test 7: Resampler<float> - Downsampling (48k -> 44.1k)
+    // ---
+    std::cout << "\n## Test 7: Resampler Downsampling (48k -> 44.1k) ##"
+              << std::endl;
+    try {
+        Resampler<float, 32, 256> resampler;
+        constexpr float FS_IN = 48000.0f;
+        constexpr float FS_OUT = 44100.0f;
+        constexpr int CHANNELS = 1;
+        constexpr int SAMPLES_IN = 1000;
+
+        // Calculate expected output size based on ratio
+        int expectedOutputSize =
+            static_cast<int>(std::floor(SAMPLES_IN * (FS_OUT / FS_IN)));
+
+        resampler.configure(FS_IN, FS_OUT, CHANNELS, SAMPLES_IN);
+
+        std::vector<std::vector<float>> inputBuffer, outputBuffer;
+        generateSine(inputBuffer, CHANNELS, SAMPLES_IN, 1000.0f, FS_IN);
+
+        // Provide a small buffer margin as fractional resampling can vary by
+        // +/- 1 sample
+        outputBuffer.assign(CHANNELS,
+                            std::vector<float>(expectedOutputSize + 10, 0.0f));
+
+        // Prepare pointers for the raw resample call
+        std::vector<const float*> inPtrs(CHANNELS);
+        std::vector<float*> outPtrs(CHANNELS);
+        for(int i = 0; i < CHANNELS; ++i) {
+            inPtrs[i] = inputBuffer[i].data();
+            outPtrs[i] = outputBuffer[i].data();
+        }
+
+        // Updated call signature: ptrs, channels, and input sample count
+        int produced = resampler.resample(
+            inPtrs.data(), outPtrs.data(), CHANNELS, SAMPLES_IN);
+
+        std::cout << "Input Samples: " << SAMPLES_IN
+                  << ", Produced: " << produced << std::endl;
+
+        if(produced <= 0) {
+            throw std::runtime_error("Resampler produced zero samples.");
+        }
+
+        // Verify signal presence using RMS
+        float sumSq = 0;
+        for(int i = 0; i < produced; ++i)
+            sumSq += outputBuffer[0][i] * outputBuffer[0][i];
+        float rms = std::sqrt(sumSq / produced);
+
+        std::cout << "Output RMS: " << rms << " (Target ~0.707)" << std::endl;
+        if(rms < 0.5f) {
+            throw std::runtime_error("Output signal is too weak or silent.");
+        }
+
+        std::cout << "PASSED: Downsampling test." << std::endl;
+    } catch(const std::exception& e) {
+        std::cout << "!!! FAILED: Resampler Downsampling. Caught: " << e.what()
+                  << std::endl;
+        allTestsPassed = false;
+    }
+    std::cout << "---" << std::endl;
+
+    // ---
+    // Test 8: Resampler<double> - Multi-block Phase Continuity
+    // ---
+    std::cout
+        << "\n## Test 8: Resampler Multi-block Continuity (44.1k -> 96k) ##"
+        << std::endl;
+    try {
+        Resampler<double, 32, 512> resampler;
+        constexpr double FS_IN = 44100.0;
+        constexpr double FS_OUT = 96000.0;
+        constexpr int CHANNELS = 1;
+        constexpr int BLOCK_SIZE = 256;
+
+        resampler.configure(FS_IN, FS_OUT, CHANNELS, BLOCK_SIZE);
+
+        std::vector<std::vector<double>> b1In, b2In, b1Out, b2Out;
+        generateSine(b1In, CHANNELS, BLOCK_SIZE, 440.0, FS_IN);
+        generateSine(b2In, CHANNELS, BLOCK_SIZE, 440.0, FS_IN);
+
+        b1Out.assign(CHANNELS, std::vector<double>(BLOCK_SIZE * 3, 0.0));
+        b2Out.assign(CHANNELS, std::vector<double>(BLOCK_SIZE * 3, 0.0));
+
+        // Prepare pointers for Block 1
+        std::vector<const double*> inPtrs1 = {b1In[0].data()};
+        std::vector<double*> outPtrs1 = {b1Out[0].data()};
+        int p1 = resampler.resample(
+            inPtrs1.data(), outPtrs1.data(), CHANNELS, BLOCK_SIZE);
+
+        // Prepare pointers for Block 2
+        std::vector<const double*> inPtrs2 = {b2In[0].data()};
+        std::vector<double*> outPtrs2 = {b2Out[0].data()};
+        int p2 = resampler.resample(
+            inPtrs2.data(), outPtrs2.data(), CHANNELS, BLOCK_SIZE);
+
+        std::cout << "Block 1 produced: " << p1 << " samples." << std::endl;
+        std::cout << "Block 2 produced: " << p2 << " samples." << std::endl;
+
+        // Continuity check: the signal should not be flat at the boundary
+        if(std::abs(b1Out[0][p1 - 1] - b2Out[0][0]) < 1e-12) {
+            std::cout << "Warning: Output samples at block boundary are "
+                         "identical. Check phase logic."
+                      << std::endl;
+            allTestsPassed = false;
+        } else {
+            std::cout << "PASSED: Multi-block continuity test." << std::endl;
+        }
+    } catch(const std::exception& e) {
+        std::cout << "!!! FAILED: Resampler Continuity. Caught: " << e.what()
+                  << std::endl;
+        allTestsPassed = false;
+    }
     std::cout << "---" << std::endl;
 
     // ---
