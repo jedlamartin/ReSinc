@@ -337,6 +337,11 @@ public:
 
     template<typename T>
     typename std::enable_if_t<
+        resinc_traits::is_juce_type<std::decay_t<T>>::value>
+        resample(T&& input, T& output);
+
+    template<typename T>
+    typename std::enable_if_t<
         resinc_traits::is_single_channel<std::decay_t<T>>::value>
         resample(T&& input, T& output);
 
@@ -781,5 +786,75 @@ void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::configure(TYPE sampleRate,
 }
 
 // =============================================================================
-//  IMPLEMENTATIONS: Interpolate
+//  IMPLEMENTATIONS: Resample
 // =============================================================================
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+template<typename T>
+typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value>
+    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
+    resample_helper(input.getArrayOfReadPointers(),
+                    output.getArrayOfWritePointers(),
+                    input.getNumChannels(),
+                    output.getNumSamples());
+}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+template<typename T>
+typename std::enable_if_t<
+    resinc_traits::is_single_channel<std::decay_t<T>>::value>
+    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
+    const TYPE* ptr = input.data();
+    TYPE* outPtr = output.data();
+    resample_helper(&ptr, &outPtr, 1, static_cast<int>(input.size()));
+}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+template<typename T>
+typename std::enable_if_t<
+    resinc_traits::is_multi_channel<std::decay_t<T>>::value>
+    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
+    int channels = static_cast<int>(input.size());
+    if(channels == 0) return;
+    std::vector<const TYPE*> inPtrs(channels);
+    std::vector<TYPE*> outPtrs(channels);
+    for(int i = 0; i < channels; i++) {
+        inPtrs[i] = input[i].data();
+        outPtrs[i] = output[i].data();
+    }
+    resample_helper(inPtrs.data(),
+                    outPtrs.data(),
+                    channels,
+                    static_cast<int>(input[0].size()));
+}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(
+    const TYPE* const* ptrToInBuffers,
+    TYPE* const* ptrToBuffers,
+    int numChannels,
+    int numSamples) {
+    resample_helper(ptrToInBuffers, ptrToBuffers, numChannels, numSamples);
+}
+
+// =============================================================================
+//  IMPLEMENTATIONS: Helpers
+// =============================================================================
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+void Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample_helper(
+    const TYPE* const* ptrToInBuffers,
+    TYPE* const* ptrToOutBuffers,
+    int numChannels,
+    int numSamples) {
+    if(numChannels <= 0 || numSamples <= 0) {
+        throw std::invalid_argument(
+            "Number of channels and samples must be positive.");
+    }
+
+    if(static_cast<size_t>(numChannels) > x.size() ||
+       static_cast<size_t>(numSamples + SINC_RADIUS) > x[0].size())
+        throw std::runtime_error(
+            "Resampler: Input size exceeds configured maxBlockSize.");
+
+    // TODO: Implement resampling logic using the Sinc table and phase
+    // accumulator.
+}
