@@ -44,12 +44,6 @@ void process(std::vector<std::vector<float>>& buffer) {
 }
 ```
 
-### API Summary
-* `interpolate(input)`: Upsamples input data.
-* `process(callback)`: Provides access to the high-rate internal buffer.
-* `decimate(output)`: Applies anti-aliasing and downsamples to output.
-* **Latency**: Fixed at `2 * SINC_RADIUS` samples.
-
 ## Resampler
 The `Resampler` handles asynchronous rate conversion where the ratio is not an integer (e.g., converting a 48kHz file for 44.1kHz playback).
 
@@ -71,17 +65,32 @@ void process(std::vector<std::vector<float>>& input,
 }
 ```
 
-### API Summary
-* `resample(input, output)`: Performs the asynchronous conversion.
-* `int` **Return Type**: Because fractional ratios can result in varying samples per block, the return value indicates how many samples in the output buffer are valid.
-* **Gain Scaling**: Automatically applies compensation when downsampling to maintain unity gain.
-* **Latency**: Fixed at `SINC_RADIUS` samples (at input rate).
+## Stateless Resampling (One-Shot)
+For offline processing, asset loading, or scenarios where you do not need to maintain history between blocks, use the global `resample()` functions. These are "one-shot" and treat the boundaries of the input as silence (zero-padding).
+
+### Quick Start
+```cpp
+#include "ReSinc.hpp"
+
+void convertAsset() {
+    std::vector<std::vector<double>> inputVec = /* ... */;
+    std::vector<std::vector<double>> outputVec = /* ... */;
+
+    // Perform a one-shot conversion
+    // <TYPE, SINC_RADIUS, PHASE_RESOLUTION>
+    int produced = resample<double, 32, 256>(inputVec, outputVec, 48000.0, 44100.0);
+}
+```
+
+### Performance Note
+The stateless functions re-calculate the Sinc filter table on every call. For repeated real-time block processing, the `Resampler` or `Oversampler` classes are significantly more efficient.
 
 ## Latency & Phase
 This library uses **linear-phase** (symmetric) filters.
 
 * **Oversampler Latency**: `2 * SINC_RADIUS` (input samples).
 * **Resampler Latency**: `SINC_RADIUS` (input samples).
+* **Stateless**: No class-based latency, but boundaries are zero-padded.
 
 To maintain perfect alignment in a DAW, you must report these values to the host for Latency Compensation.
 
