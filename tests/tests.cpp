@@ -518,6 +518,91 @@ int main() {
                   << std::endl;
         allTestsPassed = false;
     }
+
+    // ---
+    // Test 9: Stateless Resample (Standalone Function - Raw Pointers)
+    // ---
+    std::cout << "\n## Test 9: Stateless Standalone Function (44.1k -> 48k) ##"
+              << std::endl;
+    try {
+        constexpr float FS_IN = 44100.0f;
+        constexpr float FS_OUT = 48000.0f;
+        constexpr int CHANNELS = 1;
+        constexpr int SAMPLES_IN = 512;
+        constexpr int SINC_RADIUS = 32;
+
+        std::vector<std::vector<float>> inputBuffer, outputBuffer;
+        generateSine(inputBuffer, CHANNELS, SAMPLES_IN, 1000.0f, FS_IN);
+
+        int expectedSize = static_cast<int>(SAMPLES_IN * (FS_OUT / FS_IN));
+        outputBuffer.assign(CHANNELS,
+                            std::vector<float>(expectedSize + 10, 0.0f));
+
+        const float* inPtrs[] = {inputBuffer[0].data()};
+        float* outPtrs[] = {outputBuffer[0].data()};
+
+        // Calling the standalone template function
+        int produced = resample<float, SINC_RADIUS, 256>(
+            inPtrs, outPtrs, CHANNELS, SAMPLES_IN, FS_IN, FS_OUT);
+
+        std::cout << "Stateless conversion produced: " << produced
+                  << " samples." << std::endl;
+
+        if(produced <= 0)
+            throw std::runtime_error("Stateless resample produced no samples.");
+
+        // Verify signal presence (RMS)
+        float sumSq = 0;
+        for(int i = 0; i < produced; ++i)
+            sumSq += outputBuffer[0][i] * outputBuffer[0][i];
+        float rms = std::sqrt(sumSq / produced);
+
+        std::cout << "Stateless RMS: " << rms << std::endl;
+
+        if(rms < 0.5f)
+            throw std::runtime_error("Stateless output signal too weak.");
+
+        std::cout << "PASSED: Stateless standalone function test." << std::endl;
+    } catch(const std::exception& e) {
+        std::cout << "!!! FAILED: Test 9. Caught: " << e.what() << std::endl;
+        allTestsPassed = false;
+    }
+    std::cout << "---" << std::endl;
+
+    // ---
+    // Test 10: Stateless Resample (SFINAE Vector Overload)
+    // ---
+    std::cout << "\n## Test 10: Stateless Vector Overload (96k -> 44.1k) ##"
+              << std::endl;
+    try {
+        constexpr double FS_IN = 96000.0;
+        constexpr double FS_OUT = 44100.0;
+        constexpr int SINC_RADIUS = 32;
+
+        std::vector<std::vector<double>> inputVec, outputVec;
+        generateSine(inputVec, 2, 1024, 1000.0, FS_IN);
+
+        int expectedSize = static_cast<int>(1024 * (FS_OUT / FS_IN));
+        outputVec.assign(2, std::vector<double>(expectedSize + 10, 0.0));
+
+        // Testing the SFINAE overload for std::vector<std::vector<T>>
+        // Note: Make sure your implementation of this overload accepts the
+        // Sample Rates
+        int produced = resample<double, SINC_RADIUS, 256>(
+            inputVec, outputVec, FS_IN, FS_OUT);
+
+        std::cout << "Multi-channel stateless produced: " << produced
+                  << " samples." << std::endl;
+
+        if(produced < expectedSize - 1)
+            throw std::runtime_error(
+                "Output size mismatch in stateless vector test.");
+
+        std::cout << "PASSED: Stateless vector overload test." << std::endl;
+    } catch(const std::exception& e) {
+        std::cout << "!!! FAILED: Test 10. Caught: " << e.what() << std::endl;
+        allTestsPassed = false;
+    }
     std::cout << "---" << std::endl;
 
     // ---

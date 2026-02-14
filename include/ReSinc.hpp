@@ -10,6 +10,21 @@
 #define _USE_MATH_DEFINES
 
 // =============================================================================
+//  TEMPLATE UTILITIES
+// =============================================================================
+
+/** * @brief Helper to create a non-deducible context.
+ * This forces the compiler to deduce TYPE from other arguments (like buffers)
+ * and then simply convert the sample rate arguments to that TYPE.
+ */
+template<typename T>
+struct identity {
+    using type = T;
+};
+template<typename T>
+using non_deduced = typename identity<T>::type;
+
+// =============================================================================
 //  SFINAE TRAITS
 // =============================================================================
 
@@ -47,8 +62,8 @@ namespace resinc_traits {
     struct is_multi_channel<
         T,
         std::enable_if_t<has_size_and_data<T>::value &&
-                         std::is_arithmetic_v<std::decay_t<
-                             decltype(std::declval<T>()[0][0])>>>> :
+                         has_size_and_data<std::decay_t<
+                             decltype(std::declval<T>()[0])>>::value>> :
         std::true_type {};
 
     /** @brief Detects JUCE-compatible AudioBuffer classes (has
@@ -58,10 +73,17 @@ namespace resinc_traits {
     template<typename T>
     struct is_juce_type<
         T,
-        std::void_t<decltype(std::declval<T>().getNumChannels()),
-                    decltype(std::declval<T>().getNumSamples()),
-                    decltype(std::declval<T>().getReadPointer(0)),
-                    decltype(std::declval<T>().getWritePointer(0))>> :
+        std::void_t<
+            // Method Existence
+            decltype(std::declval<const T>().getNumChannels()),
+            decltype(std::declval<const T>().getNumSamples()),
+            decltype(std::declval<const T>().getReadPointer(0)),
+            decltype(std::declval<T>().getWritePointer(0)),
+            decltype(std::declval<T>().clear()),
+            std::enable_if_t<std::is_integral_v<
+                decltype(std::declval<T>().getNumChannels())>>,
+            std::enable_if_t<std::is_pointer_v<
+                decltype(std::declval<T>().getReadPointer(0))>>>> :
         std::true_type {};
 }    // namespace resinc_traits
 
@@ -152,6 +174,25 @@ namespace internal {
                                  (SINC_RADIUS + 1) * OVERSAMPLE_FACTOR * 2>&
                 window);
     };
+
+    /**
+     * @brief Core implementation for stateless one-shot resampling.
+     * * This helper performs a full sample rate conversion by locally
+     * configuring a Sinc filter and Kaiser window. Unlike the class-based
+     * resampler, this function treats the boundaries of the input buffer as
+     * silence (zero-padding).
+     * *
+     * * Performance Note: This function re-calculates the filter table on every
+     * call. For repeated block-based processing, use the Resampler class
+     * instead.
+     */
+    template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256>
+    int resample_helper(const TYPE* const* ptrToInBuffers,
+                        TYPE* const* ptrToOutBuffers,
+                        int numChannels,
+                        int numSamples,
+                        TYPE sourceSampleRate,
+                        TYPE targetSampleRate);
 }    // namespace internal
 
 // =============================================================================
@@ -419,6 +460,70 @@ private:
                         int numChannels,
                         int numSamples);
 };
+
+// =============================================================================
+//  STATELESS RESAMPLING FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Resamples a JUCE-style AudioBuffer without internal history.
+ * * This is a one-shot function that ignores previous or future audio blocks.
+ * Ideal for offline processing or UI assets.
+ * * @tparam TYPE             Sample type (float, double).
+ * @tparam SINC_RADIUS      Sinc kernel radius.
+ * @tparam RESOLUTION       Phase lookup table resolution.
+ * @return The number of output samples produced.
+ */
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256, typename T>
+typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
+                          int>
+    resample(T&& input,
+             non_deduced<std::remove_reference_t<T>>& output,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate);
+
+/**
+ * @brief Resamples a single-channel container (e.g., std::vector<float>)
+ * without internal history.
+ */
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256, typename T>
+typename std::
+    enable_if_t<resinc_traits::is_single_channel<std::decay_t<T>>::value, int>
+    resample(T&& input,
+             non_deduced<std::remove_reference_t<T>>& output,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate);
+
+/**
+ * @brief Resamples a multi-channel container (e.g., vector of vectors) without
+ * internal history.
+ */
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256, typename T>
+typename std::
+    enable_if_t<resinc_traits::is_multi_channel<std::decay_t<T>>::value, int>
+    resample(T&& input,
+             non_deduced<std::remove_reference_t<T>>& output,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate);
+
+/**
+ * @brief Resamples from raw pointers without internal history (Base
+ * Implementation).
+ * * @param ptrToInBuffers    Array of pointers to input channel data.
+ * @param ptrToOutBuffers   Array of pointers to output channel data.
+ * @param numChannels       Number of channels to process.
+ * @param numSamples        Number of input samples.
+ * @param sourceSampleRate  The sample rate of the input data.
+ * @param targetSampleRate  The desired output sample rate.
+ * @return The number of output samples produced.
+ */
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256>
+int resample(const TYPE* const* ptrToInBuffers,
+             TYPE* const* ptrToOutBuffers,
+             int numChannels,
+             int numSamples,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate);
 
 // =============================================================================
 //  IMPLEMENTATIONS: CircularBuffer
@@ -984,5 +1089,137 @@ int Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample_helper(
     }
     current_phase =
         (current_phase + (outputCount / oversampleFactor)) - numSamples;
+    return outputCount;
+}
+
+// =============================================================================
+//  IMPLEMENTATIONS: resample
+// =============================================================================
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION, typename T>
+typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
+                          int>
+    resample(T&& input,
+             non_deduced<std::remove_reference_t<T>>& output,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate) {
+    return internal::resample_helper<TYPE, SINC_RADIUS, RESOLUTION>(
+        input.getArrayOfReadPointers(),
+        output.getArrayOfWritePointers(),
+        input.getNumChannels(),
+        output.getNumSamples(),
+        sourceSampleRate,
+        targetSampleRate);
+}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION, typename T>
+typename std::
+    enable_if_t<resinc_traits::is_single_channel<std::decay_t<T>>::value, int>
+    resample(T&& input,
+             non_deduced<std::remove_reference_t<T>>& output,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate) {
+    const TYPE* ptr = input.data();
+    TYPE* outPtr = output.data();
+    return internal::resample_helper<TYPE, SINC_RADIUS, RESOLUTION>(
+        &ptr,
+        &outPtr,
+        1,
+        static_cast<int>(input.size()),
+        sourceSampleRate,
+        targetSampleRate);
+}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION, typename T>
+typename std::
+    enable_if_t<resinc_traits::is_multi_channel<std::decay_t<T>>::value, int>
+    resample(T&& input,
+             non_deduced<std::remove_reference_t<T>>& output,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate) {
+    int channels = static_cast<int>(input.size());
+    if(channels == 0) return 0;
+    std::vector<const TYPE*> inPtrs(channels);
+    std::vector<TYPE*> outPtrs(channels);
+    for(int i = 0; i < channels; i++) {
+        inPtrs[i] = input[i].data();
+        outPtrs[i] = output[i].data();
+    }
+    return internal::resample_helper<TYPE, SINC_RADIUS, RESOLUTION>(
+        inPtrs.data(),
+        outPtrs.data(),
+        channels,
+        static_cast<int>(input[0].size()),
+        sourceSampleRate,
+        targetSampleRate);
+}
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+int resample(const TYPE* const* ptrToInBuffers,
+             TYPE* const* ptrToOutBuffers,
+             int numChannels,
+             int numSamples,
+             non_deduced<TYPE> sourceSampleRate,
+             non_deduced<TYPE> targetSampleRate) {
+    return internal::resample_helper<TYPE, SINC_RADIUS, RESOLUTION>(
+        ptrToInBuffers,
+        ptrToOutBuffers,
+        numChannels,
+        numSamples,
+        sourceSampleRate,
+        targetSampleRate);
+}
+
+// =============================================================================
+//  IMPLEMENTATIONS: Helpers
+// =============================================================================
+
+template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
+int internal::resample_helper(const TYPE* const* ptrToInBuffers,
+                              TYPE* const* ptrToOutBuffers,
+                              int numChannels,
+                              int numSamples,
+                              TYPE sourceSampleRate,
+                              TYPE targetSampleRate) {
+    if(numChannels <= 0 || numSamples <= 0) return 0;
+
+    internal::Sinc<TYPE, RESOLUTION, SINC_RADIUS> sinc;
+    TYPE cutoff = std::min(sourceSampleRate, targetSampleRate) / TYPE(2.0);
+    sinc.configure_with_cutoff(cutoff, sourceSampleRate);
+    sinc.applyWindow(
+        Window::Kaiser<TYPE, (SINC_RADIUS + 1) * RESOLUTION * 2> {5.0});
+
+    const TYPE invOversampleFactor = sourceSampleRate / targetSampleRate;
+    const TYPE oversampleFactor = targetSampleRate / sourceSampleRate;
+    const int outputCount = static_cast<int>(numSamples * oversampleFactor);
+    const TYPE gainScale = (oversampleFactor < TYPE(1.0)) ?
+                               static_cast<TYPE>(oversampleFactor) :
+                               TYPE(1.0);
+
+    for(int k = 0; k < outputCount; ++k) {
+        const double virtualIndex =
+            static_cast<double>(k) * invOversampleFactor;
+        const int index = static_cast<int>(virtualIndex);
+        const int delta = static_cast<int>((virtualIndex - index) * RESOLUTION);
+
+        // --- Skip Zeros: Calculate valid n-range ---
+        // Constraint 1: n >= -SINC_RADIUS && n <= SINC_RADIUS
+        // Constraint 2: 0 <= (index - n) < numSamples
+        //   => n <= index
+        //   => n > index - numSamples
+        const int n_start = std::max(-SINC_RADIUS, index - numSamples + 1);
+        const int n_end = std::min(SINC_RADIUS, index);
+
+        for(int channel = 0; channel < numChannels; channel++) {
+            TYPE acc = 0;
+            const TYPE* in = ptrToInBuffers[channel];
+
+            // Hot loop: No branches, minimal iterations at boundaries
+            for(int n = n_start; n <= n_end; n++) {
+                acc += sinc(n, delta) * in[index - n];
+            }
+
+            ptrToOutBuffers[channel][k] = acc * gainScale;
+        }
+    }
     return outputCount;
 }
