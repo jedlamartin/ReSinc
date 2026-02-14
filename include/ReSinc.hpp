@@ -413,7 +413,7 @@ public:
     template<typename T>
     typename std::
         enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value, int>
-        resample(T&& input, T& output);
+        resample(T&& input, non_deduced<std::remove_reference_t<T>>& output);
 
     /**
      * @brief Resamples a single-channel container.
@@ -423,7 +423,7 @@ public:
     typename std::enable_if_t<
         resinc_traits::is_single_channel<std::decay_t<T>>::value,
         int>
-        resample(T&& input, T& output);
+        resample(T&& input, non_deduced<std::remove_reference_t<T>>& output);
 
     /**
      * @brief Resamples a multi-channel container (vector of vectors).
@@ -433,7 +433,7 @@ public:
     typename std::enable_if_t<
         resinc_traits::is_multi_channel<std::decay_t<T>>::value,
         int>
-        resample(T&& input, T& output);
+        resample(T&& input, non_deduced<std::remove_reference_t<T>>& output);
 
     /**
      * @brief Resamples from raw pointers (Base Implementation).
@@ -975,7 +975,9 @@ template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
 template<typename T>
 typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
                           int>
-    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
+    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(
+        T&& input,
+        non_deduced<std::remove_reference_t<T>>& output) {
     return resample_helper(input.getArrayOfReadPointers(),
                            output.getArrayOfWritePointers(),
                            input.getNumChannels(),
@@ -986,7 +988,9 @@ template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
 template<typename T>
 typename std::
     enable_if_t<resinc_traits::is_single_channel<std::decay_t<T>>::value, int>
-    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
+    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(
+        T&& input,
+        non_deduced<std::remove_reference_t<T>>& output) {
     const TYPE* ptr = input.data();
     TYPE* outPtr = output.data();
     return resample_helper(&ptr, &outPtr, 1, static_cast<int>(input.size()));
@@ -996,7 +1000,9 @@ template<typename TYPE, int SINC_RADIUS, int RESOLUTION>
 template<typename T>
 typename std::
     enable_if_t<resinc_traits::is_multi_channel<std::decay_t<T>>::value, int>
-    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(T&& input, T& output) {
+    Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample(
+        T&& input,
+        non_deduced<std::remove_reference_t<T>>& output) {
     int channels = static_cast<int>(input.size());
     if(channels == 0) return 0;
     std::vector<const TYPE*> inPtrs(channels);
