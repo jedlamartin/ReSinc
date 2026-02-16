@@ -323,28 +323,40 @@ public:
 
     /**
      * @brief Processes upsampled data using a JUCE-style wrapper.
-     * Creates a temporary wrapper around the internal buffer and passes it to
-     * the callback.
-     * @param processBlock Function/Lambda receiving (T buffer).
+     * * Constructs a temporary wrapper (e.g., juce::AudioBuffer) around the
+     * internal high-rate buffers and passes it to the callback.
+     * * @tparam T The buffer wrapper type to construct (e.g.,
+     * juce::AudioBuffer<float>).
+     * @tparam Callable Deduced type of the callback.
+     * @param processBlock A callable receiving the constructed buffer:
+     * void(T&).
      */
-    template<typename T>
+    template<typename T, typename Callable>
     typename std::enable_if_t<
         resinc_traits::is_juce_type<std::decay_t<T>>::value>
-        process(std::function<void(T)> processBlock);
-
+        process(Callable&& processBlock);
     /**
-     * @brief Processes upsampled data via vector of vectors.
-     * Direct access to the internal `vector<vector<TYPE>>`.
+     * @brief Processes upsampled data via the internal multi-channel container.
+     * * Provides direct, automatic access to the internal
+     * `vector<vector<TYPE>>`. Use this for algorithms requiring cross-channel
+     * data (e.g., M/S or Stereo-linking).
+     * * @tparam Callable Deduced type of the callback.
+     * @param processBlock A callable receiving the internal buffer:
+     * void(std::vector<std::vector<TYPE>>&).
      */
-    void process(
-        std::function<void(std::vector<std::vector<TYPE>>&)> processBlock);
+    template<typename Callable>
+    void process(Callable&& processBlock);
 
     /**
      * @brief Processes upsampled data channel-by-channel.
-     * Iterates the internal buffer and calls the callback for each channel
-     * vector.
+     * * Iterates through the internal buffers and executes the callback for
+     * each individual channel. Ideal for independent mono-style DSP effects.
+     * * @tparam Callable Deduced type of the callback.
+     * @param processBlock A callable receiving a single channel:
+     * void(std::vector<TYPE>&).
      */
-    void process(std::function<void(std::vector<TYPE>&)> processBlock);
+    template<typename Callable>
+    void processEach(Callable&& processBlock);
 
 private:
     internal::Sinc<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS> sinc;
@@ -474,11 +486,17 @@ private:
  * @tparam RESOLUTION       Phase lookup table resolution.
  * @return The number of output samples produced.
  */
-template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256, typename T>
-typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
-                          int>
-    resample(T&& input,
-             non_deduced<std::remove_reference_t<T>>& output,
+template<typename TYPE,
+         int SINC_RADIUS,
+         int RESOLUTION = 256,
+         typename T1,
+         typename T2>
+typename std::enable_if_t<
+    resinc_traits::is_juce_type<std::decay_t<T1>>::value &&
+        resinc_traits::is_juce_type<std::decay_t<T2>>::value,
+    int>
+    resample(T1&& input,
+             T2& output,
              non_deduced<TYPE> sourceSampleRate,
              non_deduced<TYPE> targetSampleRate);
 
@@ -486,11 +504,17 @@ typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
  * @brief Resamples a single-channel container (e.g., std::vector<float>)
  * without internal history.
  */
-template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256, typename T>
-typename std::
-    enable_if_t<resinc_traits::is_single_channel<std::decay_t<T>>::value, int>
-    resample(T&& input,
-             non_deduced<std::remove_reference_t<T>>& output,
+template<typename TYPE,
+         int SINC_RADIUS,
+         int RESOLUTION = 256,
+         typename T1,
+         typename T2>
+typename std::enable_if_t<
+    resinc_traits::is_single_channel<std::decay_t<T1>>::value &&
+        resinc_traits::is_single_channel<std::decay_t<T2>>::value,
+    int>
+    resample(T1&& input,
+             T2& output,
              non_deduced<TYPE> sourceSampleRate,
              non_deduced<TYPE> targetSampleRate);
 
@@ -498,11 +522,17 @@ typename std::
  * @brief Resamples a multi-channel container (e.g., vector of vectors) without
  * internal history.
  */
-template<typename TYPE, int SINC_RADIUS, int RESOLUTION = 256, typename T>
-typename std::
-    enable_if_t<resinc_traits::is_multi_channel<std::decay_t<T>>::value, int>
-    resample(T&& input,
-             non_deduced<std::remove_reference_t<T>>& output,
+template<typename TYPE,
+         int SINC_RADIUS,
+         int RESOLUTION = 256,
+         typename T1,
+         typename T2>
+typename std::enable_if_t<
+    resinc_traits::is_multi_channel<std::decay_t<T1>>::value &&
+        resinc_traits::is_multi_channel<std::decay_t<T2>>::value,
+    int>
+    resample(T1&& input,
+             T2& output,
              non_deduced<TYPE> sourceSampleRate,
              non_deduced<TYPE> targetSampleRate);
 
@@ -812,10 +842,10 @@ void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::decimate(
 // =============================================================================
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-template<typename T>
+template<typename T, typename Callable>
 typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value>
     Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::process(
-        std::function<void(T)> processBlock) {
+        Callable&& processBlock) {
     int ch = static_cast<int>(interpolatedBuf.size());
     std::vector<TYPE*> ptrs(ch);
     for(int i = 0; i < ch; ++i) ptrs[i] = interpolatedBuf[i].data();
@@ -824,14 +854,16 @@ typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value>
 }
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
+template<typename Callable>
 void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::process(
-    std::function<void(std::vector<std::vector<TYPE>>&)> processBlock) {
+    Callable&& processBlock) {
     processBlock(interpolatedBuf);
 }
 
 template<typename TYPE, int OVERSAMPLE_FACTOR, int SINC_RADIUS>
-void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::process(
-    std::function<void(std::vector<TYPE>&)> processBlock) {
+template<typename Callable>
+void Oversampler<TYPE, OVERSAMPLE_FACTOR, SINC_RADIUS>::processEach(
+    Callable&& processBlock) {
     for(auto& i : interpolatedBuf) {
         processBlock(i);
     }
@@ -1101,11 +1133,17 @@ int Resampler<TYPE, SINC_RADIUS, RESOLUTION>::resample_helper(
 // =============================================================================
 //  IMPLEMENTATIONS: resample
 // =============================================================================
-template<typename TYPE, int SINC_RADIUS, int RESOLUTION, typename T>
-typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
-                          int>
-    resample(T&& input,
-             non_deduced<std::remove_reference_t<T>>& output,
+template<typename TYPE,
+         int SINC_RADIUS,
+         int RESOLUTION,
+         typename T1,
+         typename T2>
+typename std::enable_if_t<
+    resinc_traits::is_juce_type<std::decay_t<T1>>::value &&
+        resinc_traits::is_juce_type<std::decay_t<T2>>::value,
+    int>
+    resample(T1&& input,
+             T2& output,
              non_deduced<TYPE> sourceSampleRate,
              non_deduced<TYPE> targetSampleRate) {
     return internal::resample_helper<TYPE, SINC_RADIUS, RESOLUTION>(
@@ -1117,11 +1155,17 @@ typename std::enable_if_t<resinc_traits::is_juce_type<std::decay_t<T>>::value,
         targetSampleRate);
 }
 
-template<typename TYPE, int SINC_RADIUS, int RESOLUTION, typename T>
-typename std::
-    enable_if_t<resinc_traits::is_single_channel<std::decay_t<T>>::value, int>
-    resample(T&& input,
-             non_deduced<std::remove_reference_t<T>>& output,
+template<typename TYPE,
+         int SINC_RADIUS,
+         int RESOLUTION,
+         typename T1,
+         typename T2>
+typename std::enable_if_t<
+    resinc_traits::is_single_channel<std::decay_t<T1>>::value &&
+        resinc_traits::is_single_channel<std::decay_t<T2>>::value,
+    int>
+    resample(T1&& input,
+             T2& output,
              non_deduced<TYPE> sourceSampleRate,
              non_deduced<TYPE> targetSampleRate) {
     const TYPE* ptr = input.data();
@@ -1135,11 +1179,17 @@ typename std::
         targetSampleRate);
 }
 
-template<typename TYPE, int SINC_RADIUS, int RESOLUTION, typename T>
-typename std::
-    enable_if_t<resinc_traits::is_multi_channel<std::decay_t<T>>::value, int>
-    resample(T&& input,
-             non_deduced<std::remove_reference_t<T>>& output,
+template<typename TYPE,
+         int SINC_RADIUS,
+         int RESOLUTION,
+         typename T1,
+         typename T2>
+typename std::enable_if_t<
+    resinc_traits::is_multi_channel<std::decay_t<T1>>::value &&
+        resinc_traits::is_multi_channel<std::decay_t<T2>>::value,
+    int>
+    resample(T1&& input,
+             T2& output,
              non_deduced<TYPE> sourceSampleRate,
              non_deduced<TYPE> targetSampleRate) {
     int channels = static_cast<int>(input.size());
